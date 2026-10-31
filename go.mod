@@ -1,4 +1,4 @@
-module github.com/gomsr/gorm-gen-yaml
+module github.com/gomsr/gorm-gen-yaml/v2
 
 go 1.23
 

@@ -13,7 +13,7 @@ import (
 	"gorm.io/gorm/logger"
 	"gorm.io/gorm/schema"
 
-	yamlgen "github.com/gomsr/gorm-gen-yaml"
+	yamlgen "github.com/gomsr/gorm-gen-yaml/v2"
 )
 
 // integrationDB 基于仓库根目录的 test.db 和 gen.yaml，用于集成测试。

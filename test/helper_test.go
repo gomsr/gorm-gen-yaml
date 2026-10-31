@@ -11,7 +11,7 @@ import (
 	"gorm.io/gorm/logger"
 	"gorm.io/gorm/schema"
 
-	yamlgen "github.com/gomsr/gorm-gen-yaml"
+	yamlgen "github.com/gomsr/gorm-gen-yaml/v2"
 )
 
 // 本文件提供各测试用例共用的工具函数。

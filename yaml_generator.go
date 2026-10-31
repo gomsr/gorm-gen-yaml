@@ -3,7 +3,7 @@ package yamlgen
 import (
 	"errors"
 	"fmt"
-	"github.com/gomsr/gorm-gen-yaml/template"
+	"github.com/gomsr/gorm-gen-yaml/v2/template"
 	"golang.org/x/tools/go/packages"
 	"gopkg.in/yaml.v3"
 	"gorm.io/gen"
