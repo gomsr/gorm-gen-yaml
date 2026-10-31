@@ -61,6 +61,7 @@ type Column struct {
 
 type Relate struct {
 	Table          string `yaml:"table"`
+	Name           string `yaml:"name"`
 	ForeignKey     string `yaml:"foreign_key"`
 	References     string `yaml:"references"`
 	JoinForeignKey string `yaml:"join_foreign_key"`
@@ -173,7 +174,18 @@ func (y *YamlGenerator) getTableRelateOpt(table *Table) []gen.ModelOpt {
 		if table.Many2many != "" {
 			relateConfig.Append("many2many", table.Many2many)
 		}
-		opt[i] = gen.FieldRelate(fieldType, y.generatedTable[table.Table].ModelName, y.gen.Data[y.generatedTable[table.Table].ModelName].QueryStructMeta, &field.RelateConfig{
+
+		// 关联字段名：优先使用 name（支持同一张表多次关联，通过 name 区分字段名），
+		// name 为空时回退到目标 model 结构体名，保持向后兼容
+		relateFieldName := table.Name
+		if relateFieldName == "" {
+			relateFieldName = y.generatedTable[table.Table].ModelName
+		} else if strings.Contains(relateFieldName, "_") {
+			// 仅当下划线命名时转为大驼峰；已是驼峰的原样保留
+			relateFieldName = UnderscoreToCamelCase(relateFieldName, true)
+		}
+
+		opt[i] = gen.FieldRelate(fieldType, relateFieldName, y.gen.Data[y.generatedTable[table.Table].ModelName].QueryStructMeta, &field.RelateConfig{
 			GORMTag:       relateConfig,
 			RelatePointer: relatePointer,
 		})

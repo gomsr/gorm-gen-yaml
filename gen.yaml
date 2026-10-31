@@ -1,51 +1,112 @@
 config:
-  tag_json_camel: lower # lower 首字母小写驼峰，upper 首字母大写驼峰
+  tag_json_camel: lower # lower 首字母小写驼峰，upper 首字母大写驼峰，不填则保持下划线
+
 relation:
-  - table: club
+  # ============ 用户：方式 B 审计字段 + 多对多 + 一对多 ============
+  - table: user
     column:
-      # 定义 club 表中的 content 字段为 json 类型，类型必须以 Option 结尾
-      # 查询和插入时会自动做 json 数据解析
-      # 指定 ClubContentOption 类型，必须事先定义在 accessor(与 dao 同级)目录中
-      # 并且该类型必须可外部访问
-      content:
-        serializer: json
-        type: ClubContentOption
+      # 方式 B：任意字段名，通过 autoCreateTime/autoUpdateTime tag 触发自动填充
+      create_time:
+        type: time.Time
         tag:
           gorm:
-            default: "''"
-      # 指定自定义类型字段，需要自己实现 scan 和 value 方法
-      api_info:
-        type: ClubApiInfoOption
-
-    # club_user 表中的 club_id 对应 club 表中的 id
-    # club 表中的 applicant_id 对应 user 表中的 id
+            autoCreateTime: ""
+      update_time:
+        type: time.Time
+        tag:
+          gorm:
+            autoUpdateTime: ""
+            type: datetime(3)
+      delete_time:
+        type: gorm.DeletedAt
     relate:
-      - table: club_user
-        foreign_key: club_id
-        type: has_many
-      - table: user
-        references: applicant_id
-        foreign_key: id
-        type: belongs_to
-  - table: user
-    relate:
-      - table: user_oauth
-        foreign_key: user_id
-        type: has_one
-  - table: tag_formula
-  - table: formula
-    # formula表关联tag表，多对多关系，中间表为 tag_formula表。
-    # formula表中的id对应tag_formula中的formula_id
-    # tag表中的id对应 tag_formula表中的 tag_id
-    relate:
+      # 用户身上的标签（多对多）
       - table: tag
-        many_2_many: tag_formula
+        many_2_many: user_tag
         foreign_key: id
-        join_foreign_key: formula_id
+        join_foreign_key: user_id
         join_references: tag_id
         references: id
         type: many_many
-  - table: club_user
+      # 一个用户有多条活动参与历史（一对多）
+      - table: user_campaign_log
+        foreign_key: user_id
+        type: has_many
+
+  # ============ 标签（方式 A：字段名 created_at 自动识别）============
+  - table: tag
+
+  # ============ 邮件活动：多对多关联标签（含同表多次关联）+ 一对一配置 ============
+  - table: campaign
     column:
-      delete_time:
+      # 方式 A：字段名 created_at/updated_at 自动识别，deleted_at 指定软删除类型
+      deleted_at:
         type: gorm.DeletedAt
+      # 自定义 json 类型字段：content 存 json 数据，查询/插入时自动做序列化解析
+      # 类型必须以 Option 结尾，会在 accessor 目录生成 CampaignContentOption 类型文件
+      content:
+        serializer: json
+        type: CampaignContentOption
+        tag:
+          gorm:
+            default: "''"
+      # 普通自定义类型字段：tags 存逗号分隔字符串，需要自己实现 Value()/Scan() 方法
+      # 与 content 的区别：没有 serializer，gorm 不会自动序列化，走自定义 Scan/Value
+      tags:
+        type: CampaignTagsOption
+    props:
+      # 虚拟字段：数据库表中不存在，通常用于计算结果、关联聚合等
+      # 生成 *accessor.CampaignUserCountOption 类型字段，不会写入数据库
+      user_count:
+        type: CampaignUserCountOption
+    relate:
+      # 包含的标签（多对多，同一张表多次关联之一）
+      - table: tag
+        name: include_tags
+        many_2_many: campaign_tag_include
+        foreign_key: id
+        join_foreign_key: campaign_id
+        join_references: tag_id
+        references: id
+        type: many_many
+      # 排除的标签（多对多，同一张表多次关联之二）
+      - table: tag
+        name: ExcludeTags
+        many_2_many: campaign_tag_exclude
+        foreign_key: id
+        join_foreign_key: campaign_id
+        join_references: tag_id
+        references: id
+        type: many_many
+      # 一份发送配置（一对一）
+      - table: campaign_config
+        foreign_key: campaign_id
+        type: has_one
+
+  # ============ 用户活动参与历史：从属用户 + 从属活动 ============
+  - table: user_campaign_log
+    column:
+      deleted_at:
+        type: gorm.DeletedAt
+    relate:
+      # 记录属于某个用户（belongs_to）
+      - table: user
+        foreign_key: user_id
+        references: id
+        type: belongs_to
+      # 记录对应某个活动（belongs_to）
+      - table: campaign
+        foreign_key: campaign_id
+        references: id
+        type: belongs_to
+
+  # ============ 活动发送配置：从属活动（一对一）============
+  - table: campaign_config
+    column:
+      deleted_at:
+        type: gorm.DeletedAt
+    relate:
+      - table: campaign
+        foreign_key: campaign_id
+        references: id
+        type: belongs_to
