@@ -1,2 +1,19 @@
-output/**
-.idea
+*
+!*.go
+!*.sum
+!*.mod
+!*.md
+!LICENSE
+!.gitkeep
+!.gitconfig
+!static/**
+!*/
+!go.work
+!*.sh
+!*.yml
+!*.yaml
+!*.json
+!*.sql
+
+# 生成产物目录，始终忽略
+output/

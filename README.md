@@ -8,7 +8,7 @@ output 目录为根据下面配置生成出的文件。
 
 # 配置
 
-<a href="https://github.com/we7coreteam/gorm-gen-yaml/blob/main/gen.yaml">查看配置文件</a>
+<a href="https://github.com/gomsr/gorm-gen-yaml/blob/main/gen.yaml">查看配置文件</a>
 
 # 调用
 
