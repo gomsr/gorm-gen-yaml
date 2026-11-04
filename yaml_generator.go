@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"sort"
 	"strings"
 )
 
@@ -23,6 +24,7 @@ type YamlGenerator struct {
 	yaml                *DbTable
 	gen                 *gen.Generator
 	generatedTable      map[string]*GeneratorTable
+	inProgress          map[string]bool
 	columnOptionSaveDir string
 }
 
@@ -34,13 +36,21 @@ func NewYamlGenerator(path string) *YamlGenerator {
 		return nil
 	}
 	obj.generatedTable = make(map[string]*GeneratorTable)
+	obj.inProgress = make(map[string]bool)
 	return obj
 }
 
 type DbTable struct {
-	Config         Config  `yaml:"config"`
-	Table          []Table `yaml:"relation"`
-	TableMap       map[string]*Table
+	Config   Config  `yaml:"config"`
+	Table    []Table `yaml:"relation"`
+	TableMap map[string]*Table
+
+	// RelateTableMap 记录「被任何表引用过」的表名。
+	//
+	// Deprecated: 环检测请使用 inProgress。该集合只能表达“入度 > 0”，
+	// 无法区分「被引用过」与「在当前递归路径上」，按它判断是否递归会把
+	// 大量非环场景误判为环，进而生成缺少关联的裸模型，导致产物随遍历顺序变化。
+	// 字段暂时保留以兼容外部引用，后续版本移除。
 	RelateTableMap map[string]struct{}
 }
 
@@ -94,6 +104,7 @@ func (y *YamlGenerator) loadFromFile(path string) error {
 		return err
 	}
 	y.yaml.TableMap = make(map[string]*Table)
+	// Deprecated: 仅为兼容保留，生成流程已不再读取；环检测见 generateFromTable 的 inProgress。
 	y.yaml.RelateTableMap = make(map[string]struct{})
 
 	for _, table := range y.yaml.Table {
@@ -185,7 +196,16 @@ func (y *YamlGenerator) getTableRelateOpt(table *Table) []gen.ModelOpt {
 			relateFieldName = UnderscoreToCamelCase(relateFieldName, true)
 		}
 
-		opt[i] = gen.FieldRelate(fieldType, relateFieldName, y.gen.Data[y.generatedTable[table.Table].ModelName].QueryStructMeta, &field.RelateConfig{
+		relateMeta, ok := y.generatedTable[table.Table]
+		if !ok {
+			panic(fmt.Errorf("relation table <%s> of <%s> is not generated yet", table.Table, table.Name))
+		}
+		genInfo := y.gen.Data[relateMeta.ModelName]
+		if genInfo == nil {
+			panic(fmt.Errorf("relation table <%s> has no model info, model name: %s", table.Table, relateMeta.ModelName))
+		}
+
+		opt[i] = gen.FieldRelate(fieldType, relateFieldName, genInfo.QueryStructMeta, &field.RelateConfig{
 			GORMTag:       relateConfig,
 			RelatePointer: relatePointer,
 		})
@@ -198,7 +218,9 @@ func (y *YamlGenerator) getTableColumnOpt(table *Table) ([]gen.ModelOpt, bool) {
 	opt := make([]gen.ModelOpt, 0)
 	//找到column生成自定义column类型
 	hasOption := false
-	for name, column := range table.Column {
+	// 按列名有序遍历，保证同一份 yaml 多次生成结果一致（map 遍历顺序是随机的）
+	for _, name := range sortedKeys(table.Column) {
+		column := table.Column[name]
 		if column.Type != "" {
 			if strings.Contains(strings.ToLower(column.Type), "option") {
 				if column.Serializer == "json" || column.Serializer == "gob" || column.Serializer == "unixtime" {
@@ -230,12 +252,12 @@ func (y *YamlGenerator) getTableColumnOpt(table *Table) ([]gen.ModelOpt, bool) {
 			}
 		}
 		if column.Tag != nil {
-			for tagType, tags := range column.Tag {
-				ttags := tags
+			for _, tagType := range sortedKeys(column.Tag) {
+				ttags := column.Tag[tagType]
 				if tagType == "gorm" {
 					opt = append(opt, gen.FieldGORMTag(name, func(tag field.GormTag) field.GormTag {
-						for tagName, val := range ttags {
-							tag = tag.Set(tagName, val)
+						for _, tagName := range sortedKeys(ttags) {
+							tag = tag.Set(tagName, ttags[tagName])
 						}
 						return tag
 					}))
@@ -243,8 +265,8 @@ func (y *YamlGenerator) getTableColumnOpt(table *Table) ([]gen.ModelOpt, bool) {
 					tTagType := tagType
 					opt = append(opt, gen.FieldTag(name, func(tag field.Tag) field.Tag {
 						tagStr := ""
-						for tagName, val := range ttags {
-							if val == "" {
+						for _, tagName := range sortedKeys(ttags) {
+							if val := ttags[tagName]; val == "" {
 								tagStr += tagName + ";"
 							} else {
 								tagStr += tagName + ":" + val + ";"
@@ -263,7 +285,8 @@ func (y *YamlGenerator) getTableColumnOpt(table *Table) ([]gen.ModelOpt, bool) {
 		}
 	}
 
-	for name, column := range table.Props {
+	for _, name := range sortedKeys(table.Props) {
+		column := table.Props[name]
 		tag := field.Tag{}
 		tag.Set(field.TagKeyJson, UnderscoreToCamelCase(name, y.yaml.Config.TagJsonCamel == "upper"))
 		opt = append(opt, gen.FieldNew(UnderscoreToCamelCase(name, true), "*"+strings.TrimRight(path.Base(y.columnOptionSaveDir), "/")+"."+column.Type, tag))
@@ -278,32 +301,33 @@ func (y *YamlGenerator) getTableColumnOpt(table *Table) ([]gen.ModelOpt, bool) {
 	return opt, hasOption
 }
 
+// generateFromTable 生成单表模型。
+//
+// 注意：gen.FieldRelate 在调用时会把目标表“当时”的 Relations() 快照进字段里，
+// 所以生成顺序会直接影响关联字段的嵌套深度。这里先递归把关联目标完整生成，
+// 再用 inProgress 兜住双向/环状关联，保证同一份 yaml 的产出只由 yaml 内容决定。
 func (y *YamlGenerator) generateFromTable(table *Table, opt ...gen.ModelOpt) {
+	if table == nil {
+		return
+	}
 	if generatedTable, exists := y.generatedTable[table.Name]; exists && generatedTable.Flag == 2 {
 		return
 	}
+	// 环：A→B→A 时 B 处理到 A，直接返回；A 的基础模型已由 ensureBaseModel 注册
+	if y.inProgress[table.Name] {
+		return
+	}
+	y.inProgress[table.Name] = true
+	defer delete(y.inProgress, table.Name)
 
 	for _, relate := range table.Relate {
-		_, isInRelateTable := y.yaml.RelateTableMap[relate.Table]
-
-		if !isInRelateTable {
-			y.generateFromTable(y.yaml.TableMap[relate.Table], opt...)
-		} else {
-			if _, exists := y.generatedTable[relate.Table]; exists {
-				continue
-			}
-			flag := 1
-			_, isInTable := y.yaml.TableMap[relate.Table]
-			if !isInTable {
-				flag = 2
-			}
-			relateMate := y.gen.GenerateModel(relate.Table, opt...)
-			y.gen.ApplyBasic(relateMate)
-			y.generatedTable[relate.Table] = &GeneratorTable{
-				Flag:      uint(flag),
-				ModelName: relateMate.ModelStructName,
-			}
+		// 目标表在 yaml 顶层声明时，优先完整生成它（含它自己的 relate/column 定制），
+		// 避免它先以“裸模型”出现，导致父表拿到的快照缺少二级关联。
+		if target, inTable := y.yaml.TableMap[relate.Table]; inTable && !y.inProgress[relate.Table] {
+			y.generateFromTable(target, opt...)
 		}
+		// 环上的表 / 只出现在 relate 中的表：兜底生成一个基础模型，保证有元数据可用
+		y.ensureBaseModel(relate.Table, opt...)
 	}
 
 	//找到所有relate,生成模型
@@ -335,13 +359,47 @@ func (y *YamlGenerator) generateFromTable(table *Table, opt ...gen.ModelOpt) {
 	}
 }
 
+// ensureBaseModel 为目标表生成一个不含关联/列定制的基础模型（已存在则跳过）。
+// 用于环状关联中的回边，以及只出现在 relate 里、没有在 yaml 顶层声明的表。
+func (y *YamlGenerator) ensureBaseModel(tableName string, opt ...gen.ModelOpt) {
+	if _, exists := y.generatedTable[tableName]; exists {
+		return
+	}
+	mate := y.gen.GenerateModel(tableName, opt...)
+	if mate == nil {
+		return
+	}
+	y.gen.ApplyBasic(mate)
+
+	flag := uint(2)
+	if _, inTable := y.yaml.TableMap[tableName]; inTable {
+		flag = 1 // 之后还会被完整生成一次
+	}
+	y.generatedTable[tableName] = &GeneratorTable{
+		Flag:      flag,
+		ModelName: mate.ModelStructName,
+	}
+}
+
+// sortedKeys 返回 map 的有序 key：Go 的 map 遍历顺序随机，
+// 直接 range map 会让同一份 yaml 每次生成出不同的代码。
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func (y *YamlGenerator) Generate(opt ...gen.ModelOpt) {
 	if y.yaml.Config.TagJsonCamel != "" {
 		y.gen.WithJSONTagNameStrategy(func(columnName string) (tagContent string) {
 			return UnderscoreToCamelCase(columnName, y.yaml.Config.TagJsonCamel == "upper")
 		})
 	}
-	for _, table := range y.yaml.TableMap {
-		y.generateFromTable(table, opt...)
+	// 固定按表名遍历，保证多次生成结果可复现
+	for _, name := range sortedKeys(y.yaml.TableMap) {
+		y.generateFromTable(y.yaml.TableMap[name], opt...)
 	}
 }
